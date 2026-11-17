@@ -4,135 +4,173 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TrustWork - freelance escrow</title>
+<link rel="stylesheet" href="style.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.2/ethers.umd.min.js"></script>
-<style>
-  :root { --bg:#f3f6f4; --ink:#14231d; --card:#fff; --line:#cfdad4; --accent:#0f6b4f; --warn:#b3261e; }
-  * { box-sizing: border-box; }
-  body { font-family: Georgia, serif; background: var(--bg); color: var(--ink); max-width: 720px; margin: 0 auto; padding: 24px 16px 60px; line-height: 1.5; }
-  h1 { font-size: 2rem; margin: 0 0 4px; }
-  h2 { font-size: 1.1rem; margin: 0 0 10px; }
-  p.sub { margin: 0 0 20px; color: #4a5c54; }
-  section { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 16px; margin-bottom: 14px; }
-  input { font: inherit; padding: 8px; border: 1px solid var(--line); border-radius: 4px; width: 100%; margin-bottom: 8px; }
-  button { font: inherit; background: var(--accent); color: #fff; border: 0; border-radius: 4px; padding: 8px 14px; cursor: pointer; margin: 0 6px 6px 0; }
-  button:focus-visible, input:focus-visible { outline: 3px solid #f2b705; }
-  .status { display: inline-block; padding: 2px 10px; border: 2px solid var(--accent); border-radius: 20px; font-weight: bold; }
-  #msg { min-height: 1.5em; font-weight: bold; }
-  #msg.err { color: var(--warn); }
-  dl { display: grid; grid-template-columns: 110px 1fr; gap: 4px 10px; margin: 10px 0; word-break: break-all; }
-  dt { color: #4a5c54; }
-</style>
+<script src="config.js"></script>
+<script src="contract.js"></script>
+<script src="wallet.js"></script>
 </head>
 <body>
-<h1>TrustWork</h1>
-<p class="sub">Freelance escrow: the money is held by the contract, not by a person.</p>
+<div class="wrap">
+  <header>
+    <a class="brand" href="./">Trust<span>Work</span></a>
+    <nav>
+      <span class="pill">Sepolia testnet</span>
+      <span class="pill" id="account" hidden></span>
+      <button id="connectBtn">Connect wallet</button>
+    </nav>
+  </header>
+  <p class="tagline">Freelance escrow: the client's ETH is locked in a smart contract and released to the freelancer when the work is approved.</p>
 
-<section>
-  <h2>1. Connect</h2>
-  <input id="addr" placeholder="Contract address (printed by the deploy script)">
-  <button onclick="connect()">Connect wallet</button>
-  <div id="who"></div>
-</section>
+  <div id="notice" class="notice info" role="status" aria-live="polite">Connect your MetaMask wallet to create or take jobs.</div>
 
-<section>
-  <h2>2. Client: create a job (locks ETH)</h2>
-  <input id="desc" placeholder="What needs to be done?">
-  <input id="eth" placeholder="Payment in ETH, e.g. 1">
-  <input id="dur" placeholder="Time to finish, in seconds, e.g. 3600">
-  <button onclick="createJob()">Create job and lock ETH</button>
-</section>
+  <section class="card" id="createCard">
+    <h2>Post a job (you are the client)</h2>
+    <div class="row">
+      <div><label for="desc">What needs to be done?</label><input id="desc" placeholder="e.g. Design a logo"></div>
+      <div><label for="amount">Payment (ETH)</label><input id="amount" type="number" min="0" step="0.001" placeholder="0.01"></div>
+    </div>
+    <button id="createBtn">Create job and lock ETH</button>
+  </section>
 
-<section>
-  <h2>3. Look up and act on a job</h2>
-  <input id="jid" placeholder="Job ID, e.g. 1">
-  <button onclick="loadJob()">Load job</button>
-  <div id="job"></div>
-  <div id="actions" hidden>
-    <button onclick="act('acceptJob')">Accept (freelancer)</button>
-    <input id="link" placeholder="Link to finished work">
-    <button onclick="submitWork()">Submit work (freelancer)</button>
-    <button onclick="act('approveWork')">Approve and pay (client)</button>
-    <button onclick="act('cancelJob')">Cancel open job (client)</button>
-    <button onclick="act('claimRefund')">Claim refund after deadline (client)</button>
-    <button onclick="act('raiseDispute')">Raise dispute</button>
-    <button onclick="resolve(true)">Arbiter: pay freelancer</button>
-    <button onclick="resolve(false)">Arbiter: refund client</button>
-  </div>
-</section>
+  <section class="card">
+    <div class="jobs-head">
+      <h2>Jobs</h2>
+      <button class="secondary" id="refreshBtn">Refresh</button>
+    </div>
+    <p id="earned" class="empty" hidden></p>
+    <div id="jobs"><p class="empty">Loading…</p></div>
+  </section>
 
-<div id="msg" role="status"></div>
+  <footer id="footer"></footer>
+</div>
 
 <script>
-// ABI = the list of contract functions the page is allowed to call
-const ABI = [
-  "function createJob(string,uint256) payable returns (uint256)",
-  "function acceptJob(uint256)",
-  "function submitWork(uint256,string)",
-  "function approveWork(uint256)",
-  "function cancelJob(uint256)",
-  "function claimRefund(uint256)",
-  "function raiseDispute(uint256)",
-  "function resolveDispute(uint256,bool)",
-  "function jobs(uint256) view returns (address client,address freelancer,uint256 amount,uint256 deadline,uint8 status,string description,string workLink)",
-  "function jobCount() view returns (uint256)"
-];
-const STATUS = ["Open","In progress","Submitted","Disputed","Completed","Refunded"];
-let contract, user;
-const $ = (id) => document.getElementById(id);
+// Status names in the same order as the Solidity enum
+const STATUS = ["Open", "In progress", "Submitted", "Completed", "Cancelled"];
+const ADDRESS = getContractAddress();
+let wallet = null;   // { signer, address, provider } after connecting
+let contract = null; // contract object (read-only until a wallet is connected)
 
-function say(text, isErr) { $("msg").textContent = text; $("msg").className = isErr ? "err" : ""; }
-
-async function run(label, fn) {
-  try { say(label + "... confirm in MetaMask if asked"); await fn(); say(label + " done."); }
-  catch (e) { say(e.reason || e.shortMessage || e.message, true); }
+// Small helper to build HTML elements safely (text is never parsed as HTML).
+function el(tag, props = {}, ...children) {
+  const node = Object.assign(document.createElement(tag), props);
+  node.append(...children);
+  return node;
 }
 
-async function connect() {
-  await run("Connecting", async () => {
-    if (!window.ethereum) throw new Error("MetaMask not found. Install it first.");
-    const provider = new ethers.BrowserProvider(window.ethereum);
-    const signer = await provider.getSigner();
-    user = await signer.getAddress();
-    contract = new ethers.Contract($("addr").value.trim(), ABI, signer);
-    $("who").textContent = "Connected as " + user;
-  });
+function setupContract() {
+  // Before connecting we read through a public Sepolia node, so anyone can see the jobs.
+  const runner = wallet ? wallet.signer : new ethers.JsonRpcProvider(CFG.network.rpcUrls[0]);
+  contract = new ethers.Contract(ADDRESS, ABI, runner);
 }
 
-async function createJob() {
-  await run("Creating job", async () => {
-    const tx = await contract.createJob($("desc").value, BigInt($("dur").value), { value: ethers.parseEther($("eth").value) });
-    await tx.wait();
-    $("jid").value = await contract.jobCount();
-    await loadJob();
-  });
+// ---------- Show jobs ----------
+async function loadJobs() {
+  const list = $("jobs");
+  try {
+    const count = Number(await contract.jobCount());
+    if (count === 0) { list.replaceChildren(el("p", { className: "empty", textContent: "No jobs yet. Post the first one above." })); return; }
+    const ids = [];
+    for (let id = count; id >= 1 && ids.length < 20; id--) ids.push(id); // newest 20
+    const jobs = await Promise.all(ids.map((id) => contract.jobs(id)));
+    list.replaceChildren(...jobs.map((job, i) => jobCard(ids[i], job)));
+    if (wallet) {
+      const earned = await contract.totalEarned(wallet.address);
+      $("earned").textContent = `You have earned ${ethers.formatEther(earned)} ETH as a freelancer.`;
+      $("earned").hidden = false;
+    }
+  } catch (e) {
+    list.replaceChildren(el("p", { className: "empty", textContent: "Could not load jobs: " + friendlyError(e) }));
+  }
 }
 
-async function loadJob() {
-  await run("Loading job", async () => {
-    const j = await contract.jobs(BigInt($("jid").value));
-    if (j.client === ethers.ZeroAddress) throw new Error("Job not found");
-    $("job").innerHTML =
-      `<p><span class="status">${STATUS[Number(j.status)]}</span></p><dl>` +
-      `<dt>Description</dt><dd></dd><dt>Client</dt><dd>${j.client}</dd>` +
-      `<dt>Freelancer</dt><dd>${j.freelancer === ethers.ZeroAddress ? "not yet accepted" : j.freelancer}</dd>` +
-      `<dt>Locked</dt><dd>${ethers.formatEther(j.amount)} ETH</dd>` +
-      `<dt>Deadline</dt><dd>${new Date(Number(j.deadline) * 1000).toLocaleString()}</dd>` +
-      `<dt>Work link</dt><dd></dd></dl>`;
-    const dds = $("job").querySelectorAll("dd");
-    dds[0].textContent = j.description;       // textContent: never inject user text as HTML
-    dds[5].textContent = j.workLink || "none yet";
-    $("actions").hidden = false;
-  });
+function who(addr) {
+  if (addr === ethers.ZeroAddress) return "nobody yet";
+  return wallet && addr.toLowerCase() === wallet.address.toLowerCase() ? "You" : shortAddr(addr);
 }
 
-async function act(fn) {
-  await run(fn, async () => { await (await contract[fn](BigInt($("jid").value))).wait(); await loadJob(); });
+function jobCard(id, job) {
+  const status = Number(job.status);
+  const amount = status >= 3 ? "paid out / returned" : ethers.formatEther(job.amount) + " ETH locked";
+
+  // Work link: only show http(s) links as clickable
+  let work = job.workLink || "—";
+  if (/^https?:\/\//i.test(job.workLink)) work = el("a", { href: job.workLink, target: "_blank", rel: "noopener", textContent: job.workLink });
+
+  const card = el("article", { className: "job" },
+    el("div", { className: "job-top" },
+      el("strong", { textContent: "Job #" + id }),
+      el("span", { className: "badge s" + status, textContent: STATUS[status] })),
+    el("p", { className: "job-title", textContent: job.description || "(no description)" }),
+    el("dl", {},
+      el("dt", { textContent: "Payment" }), el("dd", { textContent: amount }),
+      el("dt", { textContent: "Client" }), el("dd", { textContent: who(job.client) }),
+      el("dt", { textContent: "Freelancer" }), el("dd", { textContent: who(job.freelancer) }),
+      el("dt", { textContent: "Work" }), el("dd", {}, work)));
+
+  const actions = actionsFor(id, job, status);
+  if (actions.length) card.append(el("div", { className: "job-actions" }, ...actions));
+  return card;
 }
-async function submitWork() {
-  await run("Submitting work", async () => { await (await contract.submitWork(BigInt($("jid").value), $("link").value)).wait(); await loadJob(); });
+
+// Show only the buttons that the connected account is allowed to use right now.
+function actionsFor(id, job, status) {
+  if (!wallet) return [];
+  const me = wallet.address.toLowerCase();
+  const isClient = job.client.toLowerCase() === me;
+  const isFreelancer = job.freelancer.toLowerCase() === me;
+  const button = (text, onclick, cls = "") => el("button", { textContent: text, onclick, className: cls });
+
+  if (status === 0 && isClient) return [button("Cancel and refund me", () => act("Cancelling job", () => contract.cancelJob(id)), "secondary")];
+  if (status === 0) return [button("Accept this job", () => act("Accepting job", () => contract.acceptJob(id)))];
+  if (status === 1 && isFreelancer) {
+    const input = el("input", { placeholder: "Link to your finished work" });
+    return [input, button("Submit work", () => act("Submitting work", () => contract.submitWork(id, input.value.trim())))];
+  }
+  if (status === 2 && isClient) return [button("Approve and pay freelancer", () => act("Paying freelancer", () => contract.approveWork(id)))];
+  return [];
 }
-async function resolve(pay) {
-  await run("Resolving dispute", async () => { await (await contract.resolveDispute(BigInt($("jid").value), pay)).wait(); await loadJob(); });
+
+// Run a transaction, disable buttons while it is pending, then refresh the list.
+async function act(label, makeTx) {
+  document.querySelectorAll("button").forEach((b) => (b.disabled = true));
+  const receipt = await sendTx(label, makeTx);
+  document.querySelectorAll("button").forEach((b) => (b.disabled = false));
+  if (receipt) await loadJobs();
+  return receipt;
+}
+
+// ---------- Buttons ----------
+$("connectBtn").onclick = async () => {
+  wallet = await connectWallet();
+  if (!wallet) return;
+  notify("Wallet connected. You can post a job or take one below.", "ok");
+  setupContract();
+  loadJobs();
+};
+
+$("createBtn").onclick = async () => {
+  if (!wallet) return notify("Connect your wallet first.", "error");
+  const description = $("desc").value.trim();
+  const amount = $("amount").value.trim();
+  if (!description || !(Number(amount) > 0)) return notify("Enter a description and an amount greater than 0.", "error");
+  const ok = await act("Creating job", () => contract.createJob(description, { value: ethers.parseEther(amount) }));
+  if (ok) { $("desc").value = ""; $("amount").value = ""; }
+};
+
+$("refreshBtn").onclick = () => loadJobs();
+
+// ---------- Start ----------
+if (!ADDRESS) {
+  notify("The contract is not deployed yet. Open the Deploy page first.", "error");
+  $("jobs").replaceChildren(el("p", {}, "No contract address. ", el("a", { href: "deploy.html", textContent: "Go to the Deploy page →" })));
+  $("createCard").hidden = true;
+} else {
+  setupContract();
+  loadJobs();
+  $("footer").append("Contract: ", el("a", { href: `${EXPLORER}/address/${ADDRESS}`, target: "_blank", rel: "noopener", textContent: ADDRESS }),
+    " · ", el("a", { href: "deploy.html", textContent: "Deploy page" }));
 }
 </script>
 </body>

@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deploy TrustWork</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.2/ethers.umd.min.js"></script>
+<script src="config.js"></script>
+<script src="contract.js"></script>
+<script src="wallet.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a class="brand" href="./">Trust<span>Work</span></a>
+    <nav>
+      <span class="pill">Sepolia testnet</span>
+      <span class="pill" id="account" hidden></span>
+      <button id="connectBtn">Connect wallet</button>
+    </nav>
+  </header>
+  <p class="tagline">Deploy the TrustWork contract with your own MetaMask. Your private key never leaves MetaMask.</p>
+
+  <div id="notice" class="notice info" role="status" aria-live="polite">Step 1: connect MetaMask (it will switch to Sepolia).</div>
+
+  <section class="card">
+    <h2>Deploy the contract</h2>
+    <p id="current" class="empty"></p>
+    <button id="deployBtn">Deploy TrustWork to Sepolia</button>
+  </section>
+
+  <section class="card" id="result" hidden>
+    <h2>Deployed ✓ Next step</h2>
+    <p>Your contract address:</p>
+    <code class="box" id="newAddress"></code>
+    <p>This browser will already use it. To make the live website use it for <strong>everyone</strong>,
+       put this line in <code>frontend/config.js</code> and push to GitHub:</p>
+    <code class="box" id="configLine"></code>
+    <button class="secondary" id="copyBtn">Copy address</button>
+    <p><a href="./">Open the app →</a></p>
+  </section>
+</div>
+
+<script>
+let wallet = null;
+
+const existing = getContractAddress();
+$("current").textContent = existing
+  ? `The app currently uses ${existing}. Deploying again creates a NEW, empty contract.`
+  : "No contract deployed yet.";
+
+$("connectBtn").onclick = async () => {
+  wallet = await connectWallet();
+  if (wallet) notify("Connected to Sepolia. Step 2: click Deploy and confirm in MetaMask.", "ok");
+};
+
+$("deployBtn").onclick = async () => {
+  if (!wallet) wallet = await connectWallet();
+  if (!wallet) return;
+  $("deployBtn").disabled = true;
+  try {
+    // A ContractFactory sends the compiled bytecode as a "create contract" transaction.
+    const factory = new ethers.ContractFactory(ABI, window.TRUSTWORK_ARTIFACT.bytecode, wallet.signer);
+    notify("Please confirm the deployment in MetaMask…", "pending");
+    const contract = await factory.deploy();
+    const hash = contract.deploymentTransaction().hash;
+    notify("Deployment pending, waiting for a block (about 15 s)…", "pending", hash);
+    await contract.waitForDeployment();
+    const address = await contract.getAddress();
+
+    try { localStorage.setItem("trustwork.address", address); } catch {}
+    $("newAddress").textContent = address;
+    $("configLine").textContent = `contractAddress: "${address}",`;
+    $("copyBtn").onclick = () => navigator.clipboard.writeText(address).then(() => notify("Address copied.", "ok"));
+    $("result").hidden = false;
+    notify("Contract deployed and confirmed ✓", "ok", hash);
+  } catch (e) {
+    notify(friendlyError(e), "error");
+  }
+  $("deployBtn").disabled = false;
+};
+</script>
+</body>
+</html>
