@@ -3,7 +3,7 @@
 A client locks ETH in a smart contract when posting a job. A freelancer accepts it,
 submits the work, and is paid automatically when the client approves.
 
-**Live site:** https://edlai001.github.io/trustwork/ (Sepolia testnet)  
+**Live site:** https://edlai001.github.io/Trustwork/ (Sepolia testnet)  
 **Contract:** [0xe98610A9825518D9E3144A48f36d83B29F8eD97f](https://sepolia.etherscan.io/address/0xe98610A9825518D9E3144A48f36d83B29F8eD97f)
 
 ## Project layout
