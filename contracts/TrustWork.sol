@@ -1,158 +1,116 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title TrustWork - freelance escrow
-/// IDEA: A client locks ETH in the contract. The freelancer only gets paid
-/// when the client approves the work (or the arbiter rules for the freelancer).
-/// Nobody has to trust anybody: the CODE holds the money.
+/// @title TrustWork - a simple freelance escrow
+/// A client locks ETH in this contract when creating a job.
+/// The freelancer is paid automatically when the client approves the work.
+/// Nobody holds the money except the contract code itself.
 contract TrustWork {
-    // ---------- DATA ----------
-    // The life of a job. Completed and Refunded are FINAL (terminal).
-    enum Status { Open, InProgress, Submitted, Disputed, Completed, Refunded }
+    // ENUM used as a STATE MACHINE: every job moves forward through these steps.
+    //   Open -> InProgress -> Submitted -> Completed
+    //   Open -> Cancelled
+    enum Status { Open, InProgress, Submitted, Completed, Cancelled }
 
+    // STRUCT: groups all data that belongs to one job.
     struct Job {
-        address client;      // who pays
-        address freelancer;  // who works (empty until someone accepts)
-        uint256 amount;      // ETH locked in escrow (in wei)
-        uint256 deadline;    // unix time: work must be submitted before this
-        Status status;
-        string description;
-        string workLink;     // proof of work (URL / hash), set on submit
+        address client;      // who created the job and paid
+        address freelancer;  // who accepted the job (empty at first)
+        uint256 amount;      // ETH locked in escrow, in wei
+        Status status;       // current step in the state machine
+        string description;  // what needs to be done
+        string workLink;     // link to the finished work
     }
 
-    address public immutable arbiter; // neutral judge, set once at deploy
-    uint256 public jobCount;
-    mapping(uint256 => Job) public jobs; // jobId => Job (history is never deleted)
+    // MAPPINGS: key -> value storage.
+    uint256 public jobCount;                          // number of jobs created (IDs start at 1)
+    mapping(uint256 => Job) public jobs;              // job ID -> job data
+    mapping(address => uint256) public totalEarned;   // freelancer -> total ETH earned
 
-    // ---------- EVENTS (audit trail) ----------
-    event JobCreated(uint256 indexed id, address indexed client, uint256 amount, uint256 deadline);
+    // EVENTS: a public log of everything that happens (the frontend can read them).
+    event JobCreated(uint256 indexed id, address indexed client, uint256 amount);
     event JobAccepted(uint256 indexed id, address indexed freelancer);
     event WorkSubmitted(uint256 indexed id, string workLink);
-    event DisputeRaised(uint256 indexed id, address indexed by);
-    event JobCompleted(uint256 indexed id, address indexed freelancer, uint256 amount);
-    event JobRefunded(uint256 indexed id, address indexed client, uint256 amount);
+    event JobPaid(uint256 indexed id, address indexed freelancer, uint256 amount);
+    event JobCancelled(uint256 indexed id);
 
-    constructor(address _arbiter) {
-        require(_arbiter != address(0), "Arbiter required");
-        arbiter = _arbiter;
-    }
-
-    // ---------- MODIFIERS (reusable checks) ----------
+    // MODIFIERS: reusable checks that run before a function body (the "_;").
     modifier jobExists(uint256 id) {
         require(id > 0 && id <= jobCount, "Job not found");
         _;
     }
+
+    // Access control: only the job's client may call.
     modifier onlyClient(uint256 id) {
         require(msg.sender == jobs[id].client, "Only client");
         _;
     }
+
+    // Access control: only the job's freelancer may call.
     modifier onlyFreelancer(uint256 id) {
         require(msg.sender == jobs[id].freelancer, "Only freelancer");
         _;
     }
-    modifier onlyArbiter() {
-        require(msg.sender == arbiter, "Only arbiter");
-        _;
-    }
-    modifier inStatus(uint256 id, Status s) {
-        require(jobs[id].status == s, "Wrong job status");
+
+    // State machine guard: the job must be in the expected step.
+    modifier inStatus(uint256 id, Status expected) {
+        require(jobs[id].status == expected, "Wrong job status");
         _;
     }
 
-    // ---------- ACTIONS ----------
-    /// Client creates a job and locks ETH (msg.value) in the contract.
-    function createJob(string calldata description, uint256 durationSeconds) external payable returns (uint256) {
+    /// Client creates a job and locks the ETH sent with the transaction.
+    function createJob(string calldata description) external payable {
         require(msg.value > 0, "Must deposit ETH");
-        require(durationSeconds > 0, "Invalid duration");
         jobCount++;
-        jobs[jobCount] = Job({
-            client: msg.sender,
-            freelancer: address(0),
-            amount: msg.value,
-            deadline: block.timestamp + durationSeconds,
-            status: Status.Open,
-            description: description,
-            workLink: ""
-        });
-        emit JobCreated(jobCount, msg.sender, msg.value, block.timestamp + durationSeconds);
-        return jobCount;
+        Job storage job = jobs[jobCount];
+        job.client = msg.sender;
+        job.amount = msg.value;
+        job.description = description;
+        job.status = Status.Open;
+        emit JobCreated(jobCount, msg.sender, msg.value);
     }
 
-    /// Freelancer takes an open job. Open -> InProgress
+    /// Any other address can take an open job.  Open -> InProgress
     function acceptJob(uint256 id) external jobExists(id) inStatus(id, Status.Open) {
-        Job storage j = jobs[id];
-        require(msg.sender != j.client, "Client cannot accept own job");
-        require(block.timestamp < j.deadline, "Deadline passed");
-        j.freelancer = msg.sender;
-        j.status = Status.InProgress;
+        require(msg.sender != jobs[id].client, "Client cannot accept own job");
+        jobs[id].freelancer = msg.sender;
+        jobs[id].status = Status.InProgress;
         emit JobAccepted(id, msg.sender);
     }
 
-    /// Freelancer hands in the work. InProgress -> Submitted
+    /// Freelancer hands in the work.  InProgress -> Submitted
     function submitWork(uint256 id, string calldata workLink)
         external jobExists(id) onlyFreelancer(id) inStatus(id, Status.InProgress)
     {
-        require(block.timestamp <= jobs[id].deadline, "Deadline passed");
         jobs[id].workLink = workLink;
         jobs[id].status = Status.Submitted;
         emit WorkSubmitted(id, workLink);
     }
 
-    /// Client is happy -> freelancer is paid. Submitted -> Completed
+    /// Client approves; the escrowed ETH goes to the freelancer.  Submitted -> Completed
     function approveWork(uint256 id)
         external jobExists(id) onlyClient(id) inStatus(id, Status.Submitted)
     {
-        _payFreelancer(id);
+        Job storage job = jobs[id];
+        uint256 amount = job.amount;
+        // Update state BEFORE sending ETH, so the job can never be paid twice.
+        job.status = Status.Completed;
+        job.amount = 0;
+        totalEarned[job.freelancer] += amount;
+        (bool ok, ) = job.freelancer.call{value: amount}("");
+        require(ok, "Transfer failed");
+        emit JobPaid(id, job.freelancer, amount);
     }
 
-    /// Client cancels before anyone accepted. Open -> Refunded
+    /// Client cancels a job nobody accepted yet and gets the ETH back.  Open -> Cancelled
     function cancelJob(uint256 id)
         external jobExists(id) onlyClient(id) inStatus(id, Status.Open)
     {
-        _refundClient(id);
-    }
-
-    /// Freelancer missed the deadline -> client gets money back. InProgress -> Refunded
-    function claimRefund(uint256 id)
-        external jobExists(id) onlyClient(id) inStatus(id, Status.InProgress)
-    {
-        require(block.timestamp > jobs[id].deadline, "Deadline not reached");
-        _refundClient(id);
-    }
-
-    /// Client or freelancer disagrees -> the arbiter must decide. Submitted -> Disputed
-    function raiseDispute(uint256 id) external jobExists(id) inStatus(id, Status.Submitted) {
-        require(msg.sender == jobs[id].client || msg.sender == jobs[id].freelancer, "Not a party");
-        jobs[id].status = Status.Disputed;
-        emit DisputeRaised(id, msg.sender);
-    }
-
-    /// Arbiter decides who gets the money. Disputed -> Completed or Refunded
-    function resolveDispute(uint256 id, bool payFreelancer)
-        external jobExists(id) onlyArbiter inStatus(id, Status.Disputed)
-    {
-        if (payFreelancer) _payFreelancer(id);
-        else _refundClient(id);
-    }
-
-    // ---------- INTERNAL PAYMENT (checks-effects-interactions) ----------
-    function _payFreelancer(uint256 id) internal {
-        Job storage j = jobs[id];
-        uint256 amount = j.amount;
-        j.status = Status.Completed; // EFFECT first (blocks double payout / reentrancy)
-        j.amount = 0;
-        (bool ok, ) = j.freelancer.call{value: amount}(""); // INTERACTION last
+        Job storage job = jobs[id];
+        uint256 amount = job.amount;
+        job.status = Status.Cancelled;
+        job.amount = 0;
+        (bool ok, ) = job.client.call{value: amount}("");
         require(ok, "Transfer failed");
-        emit JobCompleted(id, j.freelancer, amount);
-    }
-
-    function _refundClient(uint256 id) internal {
-        Job storage j = jobs[id];
-        uint256 amount = j.amount;
-        j.status = Status.Refunded;
-        j.amount = 0;
-        (bool ok, ) = j.client.call{value: amount}("");
-        require(ok, "Transfer failed");
-        emit JobRefunded(id, j.client, amount);
+        emit JobCancelled(id);
     }
 }

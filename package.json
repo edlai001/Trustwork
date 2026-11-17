@@ -4,5 +4,9 @@
   "devDependencies": {
     "hardhat": "^2.22.0",
     "@nomicfoundation/hardhat-toolbox": "^5.0.0"
+  },
+  "scripts": {
+    "test": "hardhat test",
+    "export": "hardhat compile && node scripts/export-frontend.js"
   }
 }

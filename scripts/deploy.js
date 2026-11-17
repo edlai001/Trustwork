@@ -1,9 +1,11 @@
+// Local deploy (Hardhat node). For Sepolia use the website's Deploy page instead,
+// so your private key never has to be stored in a file.
 const { ethers } = require("hardhat");
+
 async function main() {
-  const [, , arbiter] = await ethers.getSigners(); // account #2 is the arbiter
-  const c = await ethers.deployContract("TrustWork", [arbiter.address]);
-  await c.waitForDeployment();
-  console.log("TrustWork deployed to:", await c.getAddress());
-  console.log("Arbiter is account #2:", arbiter.address);
+  const contract = await ethers.deployContract("TrustWork");
+  await contract.waitForDeployment();
+  console.log("TrustWork deployed to:", await contract.getAddress());
 }
+
 main().catch((e) => { console.error(e); process.exit(1); });
