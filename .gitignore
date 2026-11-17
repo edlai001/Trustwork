@@ -1,0 +1,10 @@
+node_modules/
+artifacts/
+cache/
+typechain-types/
+coverage/
+.env
+.env.*
+*.key
+# local screenshots (not part of the site)
+*.png

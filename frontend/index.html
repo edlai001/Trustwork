@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TrustWork - freelance escrow</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.2/ethers.umd.min.js"></script>
+<style>
+  :root { --bg:#f3f6f4; --ink:#14231d; --card:#fff; --line:#cfdad4; --accent:#0f6b4f; --warn:#b3261e; }
+  * { box-sizing: border-box; }
+  body { font-family: Georgia, serif; background: var(--bg); color: var(--ink); max-width: 720px; margin: 0 auto; padding: 24px 16px 60px; line-height: 1.5; }
+  h1 { font-size: 2rem; margin: 0 0 4px; }
+  h2 { font-size: 1.1rem; margin: 0 0 10px; }
+  p.sub { margin: 0 0 20px; color: #4a5c54; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 16px; margin-bottom: 14px; }
+  input { font: inherit; padding: 8px; border: 1px solid var(--line); border-radius: 4px; width: 100%; margin-bottom: 8px; }
+  button { font: inherit; background: var(--accent); color: #fff; border: 0; border-radius: 4px; padding: 8px 14px; cursor: pointer; margin: 0 6px 6px 0; }
+  button:focus-visible, input:focus-visible { outline: 3px solid #f2b705; }
+  .status { display: inline-block; padding: 2px 10px; border: 2px solid var(--accent); border-radius: 20px; font-weight: bold; }
+  #msg { min-height: 1.5em; font-weight: bold; }
+  #msg.err { color: var(--warn); }
+  dl { display: grid; grid-template-columns: 110px 1fr; gap: 4px 10px; margin: 10px 0; word-break: break-all; }
+  dt { color: #4a5c54; }
+</style>
+</head>
+<body>
+<h1>TrustWork</h1>
+<p class="sub">Freelance escrow: the money is held by the contract, not by a person.</p>
+
+<section>
+  <h2>1. Connect</h2>
+  <input id="addr" placeholder="Contract address (printed by the deploy script)">
+  <button onclick="connect()">Connect wallet</button>
+  <div id="who"></div>
+</section>
+
+<section>
+  <h2>2. Client: create a job (locks ETH)</h2>
+  <input id="desc" placeholder="What needs to be done?">
+  <input id="eth" placeholder="Payment in ETH, e.g. 1">
+  <input id="dur" placeholder="Time to finish, in seconds, e.g. 3600">
+  <button onclick="createJob()">Create job and lock ETH</button>
+</section>
+
+<section>
+  <h2>3. Look up and act on a job</h2>
+  <input id="jid" placeholder="Job ID, e.g. 1">
+  <button onclick="loadJob()">Load job</button>
+  <div id="job"></div>
+  <div id="actions" hidden>
+    <button onclick="act('acceptJob')">Accept (freelancer)</button>
+    <input id="link" placeholder="Link to finished work">
+    <button onclick="submitWork()">Submit work (freelancer)</button>
+    <button onclick="act('approveWork')">Approve and pay (client)</button>
+    <button onclick="act('cancelJob')">Cancel open job (client)</button>
+    <button onclick="act('claimRefund')">Claim refund after deadline (client)</button>
+    <button onclick="act('raiseDispute')">Raise dispute</button>
+    <button onclick="resolve(true)">Arbiter: pay freelancer</button>
+    <button onclick="resolve(false)">Arbiter: refund client</button>
+  </div>
+</section>
+
+<div id="msg" role="status"></div>
+
+<script>
+// ABI = the list of contract functions the page is allowed to call
+const ABI = [
+  "function createJob(string,uint256) payable returns (uint256)",
+  "function acceptJob(uint256)",
+  "function submitWork(uint256,string)",
+  "function approveWork(uint256)",
+  "function cancelJob(uint256)",
+  "function claimRefund(uint256)",
+  "function raiseDispute(uint256)",
+  "function resolveDispute(uint256,bool)",
+  "function jobs(uint256) view returns (address client,address freelancer,uint256 amount,uint256 deadline,uint8 status,string description,string workLink)",
+  "function jobCount() view returns (uint256)"
+];
+const STATUS = ["Open","In progress","Submitted","Disputed","Completed","Refunded"];
+let contract, user;
+const $ = (id) => document.getElementById(id);
+
+function say(text, isErr) { $("msg").textContent = text; $("msg").className = isErr ? "err" : ""; }
+
+async function run(label, fn) {
+  try { say(label + "... confirm in MetaMask if asked"); await fn(); say(label + " done."); }
+  catch (e) { say(e.reason || e.shortMessage || e.message, true); }
+}
+
+async function connect() {
+  await run("Connecting", async () => {
+    if (!window.ethereum) throw new Error("MetaMask not found. Install it first.");
+    const provider = new ethers.BrowserProvider(window.ethereum);
+    const signer = await provider.getSigner();
+    user = await signer.getAddress();
+    contract = new ethers.Contract($("addr").value.trim(), ABI, signer);
+    $("who").textContent = "Connected as " + user;
+  });
+}
+
+async function createJob() {
+  await run("Creating job", async () => {
+    const tx = await contract.createJob($("desc").value, BigInt($("dur").value), { value: ethers.parseEther($("eth").value) });
+    await tx.wait();
+    $("jid").value = await contract.jobCount();
+    await loadJob();
+  });
+}
+
+async function loadJob() {
+  await run("Loading job", async () => {
+    const j = await contract.jobs(BigInt($("jid").value));
+    if (j.client === ethers.ZeroAddress) throw new Error("Job not found");
+    $("job").innerHTML =
+      `<p><span class="status">${STATUS[Number(j.status)]}</span></p><dl>` +
+      `<dt>Description</dt><dd></dd><dt>Client</dt><dd>${j.client}</dd>` +
+      `<dt>Freelancer</dt><dd>${j.freelancer === ethers.ZeroAddress ? "not yet accepted" : j.freelancer}</dd>` +
+      `<dt>Locked</dt><dd>${ethers.formatEther(j.amount)} ETH</dd>` +
+      `<dt>Deadline</dt><dd>${new Date(Number(j.deadline) * 1000).toLocaleString()}</dd>` +
+      `<dt>Work link</dt><dd></dd></dl>`;
+    const dds = $("job").querySelectorAll("dd");
+    dds[0].textContent = j.description;       // textContent: never inject user text as HTML
+    dds[5].textContent = j.workLink || "none yet";
+    $("actions").hidden = false;
+  });
+}
+
+async function act(fn) {
+  await run(fn, async () => { await (await contract[fn](BigInt($("jid").value))).wait(); await loadJob(); });
+}
+async function submitWork() {
+  await run("Submitting work", async () => { await (await contract.submitWork(BigInt($("jid").value), $("link").value)).wait(); await loadJob(); });
+}
+async function resolve(pay) {
+  await run("Resolving dispute", async () => { await (await contract.resolveDispute(BigInt($("jid").value), pay)).wait(); await loadJob(); });
+}
+</script>
+</body>
+</html>
